@@ -1,0 +1,192 @@
+import cv2
+import numpy as np
+import time
+
+def draw_circles(circles, frame):
+    """
+    FOR VISUALISATION PURPOSES ONLY: drawing detected circles on any input image
+    
+    Parameters:
+    - frame: image frame taken using openCV
+    - circles (numpy array): 3 x n array of n detected circles
+    
+    Returns:
+    - disp_img (numpy array): image to display
+    """
+
+    image_array = np.array(frame)
+
+    img_to_draw = image_array
+
+    # if circles is not None:
+    #     circles = np.uint16(np.around(circles))
+
+    if circles is not None:
+        for circle in circles:
+            # Extract the center (x, y) and radius (r) of each circle
+            center_x, center_y, radius = circle
+            
+            # Draw the outer circle
+            cv2.circle(img_to_draw, (center_x, center_y), radius, (0, 255, 0), 2)
+            
+            # Draw the center of the circle
+            cv2.circle(img_to_draw, (center_x, center_y), 2, (0, 0, 255), 3)
+
+            # Display the coordinates and radius on the image
+            text = f"({center_x}, {center_y}), r={radius}"
+            cv2.putText(img_to_draw, text, (center_x - 50, center_y - radius - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    
+    # Display the resulting frame ###################################################
+    disp_img = img_to_draw
+
+    return disp_img
+
+def detect_ball_cv2():
+    view_mode = True
+    stream_mode = False
+
+    # Initialize the camera (use 0 for default camera)
+    cap = cv2.VideoCapture(0)
+
+    # Check if the camera opened successfully
+    if not cap.isOpened():
+        print("Error: Could not open camera.")
+        exit()
+
+
+    #################################### MISC PARAMETERS ########################################
+
+    circle_det_log = [] # Counting how long a ball is detected for
+    no_det_count = 0 # Used to count period of no. detected circles, used to reset the circle_det_log
+    final_circle = []
+    prev_det_circle = np.array([0,0,0]) # For comparison to previous frame
+
+    #################################### TUNING PARAMETERS ########################################
+
+    number_of_balls_to_detect = 3
+
+    # TUNING PARAMETERS FOR BALL DETECTION
+    circle_detect_wait_time = 10 # How many FRAMES you want to capture of a circle until it is considered detected
+    threshold = 5 # Pixel variance allowance between frames of a detected circle, for it to be considered the same circle
+    time_limit = 15 # Time limit where robot can detect ball before pivoting
+
+    # TUNING PARAMETERS FOR VISION MODEL
+    minDist_tune = 30 # Minimum distance between two circles to be considered separate circles
+    param2_tune = 20 # Sensitivity - lower = more sensitive
+    minRadius_tune = 5 # Minimum radius of valid circle
+    gauss_tune = 0 # Level of gaussian blur of raw image, to get rid of background noise
+    canny_tune = False # A different type of edge detecting method
+
+    final_circle_lamba = 3 # Filter out low confidence circle detections
+
+    # #################################### MAIN LOOP ###############################################################################
+
+    # Loop to continuously capture frames from the camera
+    while True:
+
+        # INITIALISE CAMERA Capture frame-by-frame
+        ret, frame = cap.read()
+        # If the frame is captured successfully, ret will be True
+        if not ret:
+            print("Error: Failed to capture frame.")
+            break
+
+        # Convert the image to a NumPy array
+        image_array = np.array(frame)
+
+        #################################### IMAGE PROCESSING ########################################
+        blurred_img = cv2.GaussianBlur(image_array, (15, 15), gauss_tune)
+
+        # Altering colour channels #############################
+        hsv_image = cv2.cvtColor(blurred_img, cv2.COLOR_BGR2HSV)
+
+        # Define the lower and upper bounds for green and yellow in HSV
+        lower_green = np.array([35, 50, 50])  # Lower bound for green
+        upper_green = np.array([65, 255, 255])  # Upper bound for green
+
+        lower_yellow = np.array([25, 50, 50])  # Lower bound for yellow
+        upper_yellow = np.array([40, 255, 255])  # Upper bound for yellow
+
+        # Create masks for green and yellow
+        mask_green = cv2.inRange(hsv_image, lower_green, upper_green)
+        mask_yellow = cv2.inRange(hsv_image, lower_yellow, upper_yellow)
+
+        # Combine the masks
+        mask = cv2.bitwise_or(mask_green, mask_yellow)
+
+        # Morphological operations
+        mask = cv2.erode(mask,None,iterations=2)
+        mask = cv2.dilate(mask,None,iterations=2)
+
+
+        # Use the mask to extract the colored regions
+        colored_regions = cv2.bitwise_and(image_array, image_array, mask=mask)
+        cv2.imshow('blurred img', blurred_img)
+        cv2.imshow('test', colored_regions)
+
+        blurred_img = cv2.GaussianBlur(colored_regions, (5, 5), gauss_tune)
+
+        # Edge detection #############################
+        find_edge_img = blurred_img[:, :, 2]
+
+        if canny_tune == True:
+            # Combine the edges from each channel
+            edges_combined = cv2.Canny(find_edge_img, 110, 200,5, L2gradient=True)
+        else:
+            edges_combined = cv2.Canny(find_edge_img, 110, 200, L2gradient=False)
+        
+        #################################### CIRCLE DETECTION ########################################
+        circle_det_image = edges_combined
+
+        # Hough circle detector, returns detected circles as an array called circles
+        circles = cv2.HoughCircles(
+            circle_det_image,                 # Input image
+            cv2.HOUGH_GRADIENT,               # Method used (HOUGH_GRADIENT is the only one available)
+            dp=1,                             # Inverse ratio of the accumulator resolution to the image resolution
+            minDist=minDist_tune,             # Minimum distance between the centers of detected circles
+            param1=50,                        # Higher threshold for Canny edge detection
+            param2=param2_tune,               # Accumulator threshold for the circle centers at the detection stage
+            minRadius=minRadius_tune,         # Minimum radius of the circles
+            maxRadius=0                       # Maximum radius of the circles
+        )
+
+        img_to_draw = image_array # Frame to draw the circles on - raw captured image
+        raw_circle_det = image_array
+        final_circle_det = image_array
+
+        # If circles are detected, process them
+        if circles is not None:
+            circles = np.uint16(np.around(circles))
+            circles = np.round(circles[0, :]).astype("int")
+
+            #################################### CIRCLE ARRAY FILTERING ########################################
+            # Sort detected circles by radius, largest first
+            circles_sorted = sorted(circles, key=lambda c: c[2], reverse=True)
+
+            # Keep circles with high confidence only
+            if len(circles_sorted) > number_of_balls_to_detect:
+                best_circle = circles_sorted[:number_of_balls_to_detect]
+            else:
+                best_circle = circles
+
+            best_circle = np.array(best_circle)
+            print(best_circle.shape)
+            #################################### VISUALISATION ########################################
+            raw_circle_det = draw_circles(circles, img_to_draw)
+            final_circle_det = draw_circles(best_circle, img_to_draw)
+            
+        # Display the resulting frame
+        disp_img = img_to_draw  
+
+        if view_mode == True and stream_mode == False:
+            cv2.imshow('Final Circles Detected', final_circle_det)
+            cv2.imshow('Edge Detector', edges_combined)
+            cv2.imshow('Raw Circles Detected', raw_circle_det)
+
+            #Break the loop on 'q' key press
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+   
+    return final_circle
+
+final_circle = detect_ball_cv2()
