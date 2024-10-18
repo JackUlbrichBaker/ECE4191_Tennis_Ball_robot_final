@@ -4,7 +4,7 @@ Quick repo for working on the tennis ball collecting robot for the ECE4191 unit
 
 File structure:
 
-
+```
 ├── code_stack.md
 ├── mechanical
 │   └── text.md
@@ -45,4 +45,5 @@ File structure:
 │   ├── tools.nix
 │   └── yolo.py
 └── yolov7
+```
 
